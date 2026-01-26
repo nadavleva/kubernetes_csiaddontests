@@ -146,7 +146,7 @@ Test Registration → Driver Preparation → Test Pattern Matching → Test Exec
 
 ### Test Interaction Model
 
-**Important**: Storage tests **do NOT directly contact the CSI driver**. Instead, they interact with:
+**Important**: Storage tests **do NOT directly contact the CSI driver via gRPC**. Instead, they interact with:
 
 1. **Kubernetes API Server**:
    - Create/delete PVCs, PVs, StorageClasses
@@ -163,6 +163,84 @@ Test Registration → Driver Preparation → Test Pattern Matching → Test Exec
    - Tests assume the driver is pre-installed in the cluster
    - Driver operations are triggered through Kubernetes API calls
    - Tests validate driver behavior by observing Kubernetes resource states
+
+### gRPC API vs Custom Resource (CR) Creation Flow
+
+**Critical Understanding**: Tests **never directly call gRPC APIs** on the CSI driver. All interactions follow this flow:
+
+```
+Test Code → Kubernetes API (CRs) → Kubernetes Components → gRPC → CSI Driver
+```
+
+#### Detailed Flow
+
+1. **Test Creates Kubernetes Resources (CRs)**:
+   - Tests use Kubernetes API client (`clientset.Interface`) to create:
+     - `PersistentVolumeClaim` (PVC) objects
+     - `StorageClass` objects
+     - `Pod` objects with volume references
+     - `VolumeSnapshot` objects (for snapshot tests)
+   - Example: `cs.CoreV1().PersistentVolumeClaims(ns).Create(ctx, pvc, metav1.CreateOptions{})`
+
+2. **Kubernetes Components Make gRPC Calls**:
+   - When a PVC is created, Kubernetes components automatically trigger:
+     - **external-provisioner**: Calls `CreateVolume` gRPC to provision storage
+     - **external-attacher**: Calls `ControllerPublishVolume` gRPC to attach volume
+     - **kubelet**: Calls `NodeStageVolume` and `NodePublishVolume` gRPC to mount volume
+   - These gRPC calls happen **automatically** as part of Kubernetes' normal operation
+   - Tests have **no direct control** over when or how these gRPC calls are made
+
+3. **CSI Driver Receives gRPC Calls**:
+   - The CSI driver (pre-installed in cluster) receives gRPC calls from Kubernetes components
+   - For mock driver tests, gRPC calls are intercepted and logged
+   - Mock driver logs gRPC calls with prefix `gRPCCall:` for test verification
+
+4. **Test Verification**:
+   - Tests verify behavior by checking:
+     - **Kubernetes resource states**: PVC status, Pod status, VolumeAttachment status
+     - **gRPC call logs** (mock driver only): Tests can call `GetCalls()` to retrieve logged gRPC calls
+     - **Pod file system**: Verify data persistence, I/O operations
+
+#### Example: Volume Provisioning Flow
+
+```go
+// Test code (in testsuites/provisioning.go)
+// 1. Test creates StorageClass via Kubernetes API
+sc, err := cs.StorageV1().StorageClasses().Create(ctx, storageClass, metav1.CreateOptions{})
+
+// 2. Test creates PVC via Kubernetes API
+pvc, err := cs.CoreV1().PersistentVolumeClaims(ns).Create(ctx, pvc, metav1.CreateOptions{})
+
+// 3. Kubernetes external-provisioner automatically:
+//    - Watches for new PVC
+//    - Calls driver.CreateVolume() via gRPC
+//    - Creates PV and binds to PVC
+
+// 4. Test verifies by checking Kubernetes resource state
+err = e2epv.WaitForPersistentVolumeClaimPhase(
+    v1.ClaimBound, cs, pvc.Namespace, pvc.Name, framework.Poll, timeouts.ClaimProvision)
+```
+
+#### Mock Driver gRPC Observation
+
+For tests using the mock CSI driver (`csimock` package):
+
+- Mock driver intercepts gRPC calls via `interceptGRPC()` function
+- All gRPC calls are logged with JSON format: `gRPCCall: {"Method":"CreateVolume",...}`
+- Tests can retrieve logged calls: `driver.GetCalls(ctx)` returns `[]MockCSICall`
+- Tests verify gRPC call sequences, parameters, and responses
+- **Note**: This is observation only - tests still don't make direct gRPC calls
+
+#### No VolumeReplication CRD Usage
+
+The storage test framework **does not create or interact with VolumeReplication CRDs**. Tests only work with standard Kubernetes storage resources:
+- `PersistentVolumeClaim`
+- `PersistentVolume`
+- `StorageClass`
+- `VolumeSnapshot` (CSI snapshot API)
+- `VolumeGroupSnapshot` (CSI group snapshot API)
+
+If your CSI driver uses VolumeReplication CRDs for replication features, those would be managed by your driver's controller, not by the test framework.
 
 ### Test Driver Interfaces
 
