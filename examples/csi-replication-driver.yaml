@@ -1,0 +1,59 @@
+# CSI Replication Test Driver Configuration Example
+# 
+# This file shows how to configure a CSI driver for replication testing.
+# Copy and modify this file to match your CSI driver configuration.
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-replication-test-sc
+  annotations:
+    # Enable replication for this storage class
+    replication.storage.openshift.io/replication-enabled: "true"
+provisioner: your-csi-driver.example.com
+parameters:
+  # CSI driver specific parameters
+  type: "your-storage-type"
+  
+  # Replication-specific parameters (adjust based on your driver)
+  replication.storage.openshift.io/replication-mode: "snapshot"  # or "journal"
+  replication.storage.openshift.io/remote-cluster: "remote-cluster-1"
+  replication.storage.openshift.io/schedule: "5m"  # replication frequency
+  
+volumeBindingMode: Immediate
+reclaimPolicy: Delete
+
+---
+# CSI Driver deployment (example - adjust to your driver)
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: your-csi-driver.example.com
+spec:
+  attachRequired: true
+  podInfoOnMount: true
+  storageCapacity: true
+  # Add replication capability if supported
+  # replicationEnabled: true  # This is driver-specific
+
+---
+# Example of how to run the tests:
+#
+# 1. Deploy your CSI driver to the cluster
+# 2. Create a driver configuration file like this
+# 3. Run the tests:
+#
+#    make replication-test-main DRIVER=./path/to/this/file.yaml
+#
+# 4. Focus on specific tests:
+#
+#    make replication-test-main DRIVER=./driver.yaml FOCUS="EnableVolumeReplication"
+#
+# 5. Run with verbose output:
+#
+#    make replication-test-main DRIVER=./driver.yaml VERBOSE=2
+#
+# For mock tests (no external driver required):
+#
+#    make replication-test-mock
+#    make replication-test-mock FOCUS="snapshot.*mode" VERBOSE=1
