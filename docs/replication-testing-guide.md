@@ -80,10 +80,10 @@ make replication-test VERBOSE=1
 ```
 
 **What it does:**
-- ✅ Validates main replication test suite compilation
-- ✅ Validates mock replication test suite compilation  
-- ✅ Validates framework integration
-- 📖 Provides commands for running actual tests
+- Validates main replication test suite compilation
+- Validates mock replication test suite compilation  
+- Validates framework integration
+- Provides commands for running actual tests
 
 #### `make replication-test-main`
 Provides guidance and examples for running main CSI driver certification tests.
@@ -121,10 +121,10 @@ make replication-all
 ```
 
 **Complete pipeline:**
-1. 🔨 **Build**: Compiles all components
-2. 🧹 **Lint**: Validates code quality  
-3. 🧪 **Test**: Runs mock test validation
-4. ✅ **Report**: Shows success summary
+1. **Build**: Compiles all components
+2. **Lint**: Validates code quality  
+3. **Test**: Runs mock test validation
+4. **Report**: Shows success summary
 
 ## Running Actual Tests
 
@@ -329,11 +329,11 @@ go test -v ./test/e2e --ginkgo.focus="CSI replication" --ginkgo.vv
 ## Summary
 
 The make targets provide:
-- ✅ **Compilation validation**: Ensures all components build correctly
-- ✅ **Code quality**: Lints replication test code
-- ✅ **Integration testing**: Validates framework integration
-- 📚 **Documentation**: Clear guidance for running actual tests
-- 🚀 **CI/CD ready**: Simple targets for automation pipelines
+- **Compilation validation**: Ensures all components build correctly
+- **Code quality**: Lints replication test code
+- **Integration testing**: Validates framework integration
+- **Documentation**: Clear guidance for running actual tests
+- **CI/CD ready**: Simple targets for automation pipelines
 
 Use `make replication-all` for comprehensive validation, then follow the provided guidance for running actual tests in your environment.
 

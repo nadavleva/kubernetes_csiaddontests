@@ -662,17 +662,17 @@ ifeq ($(VERBOSE),1)
 	@echo "Running standalone unit tests (no cluster required)..."
 	@echo ""
 endif
-	@echo "🚀 [EXECUTING] CSI replication protocol tests..."
+	@echo "[EXECUTING] CSI replication protocol tests..."
 	go test -v ./test/e2e/storage/csimock -run TestCSIReplication
 	@echo ""
-	@echo "🧪 [EXECUTING] Parameter validation tests..."
+	@echo "[EXECUTING] Parameter validation tests..."
 	go test -v ./test/e2e/storage/csimock -run TestReplication
 ifeq ($(VERBOSE),1)
 	@echo ""
-	@echo "⚡ [EXECUTING] Performance benchmarks..."
+	@echo "[EXECUTING] Performance benchmarks..."
 	go test -v ./test/e2e/storage/csimock -bench=BenchmarkCSI -run=^$$ -benchtime=1s
 	@echo ""
-	@echo "✅ [COMPLETE] All mock tests executed successfully!"
+	@echo "[COMPLETE] All mock tests executed successfully!"
 	@echo ""
 	@echo "Alternative options:"
 	@echo "  E2E Framework Tests (Requires Cluster):"
@@ -685,7 +685,7 @@ ifeq ($(VERBOSE),1)
 	@echo "Requirements for E2E: Kubernetes cluster with kubectl configured"
 else
 	@echo ""
-	@echo "✅ [SUCCESS] Mock tests completed. Use VERBOSE=1 for detailed output and benchmarks."
+	@echo "[SUCCESS] Mock tests completed. Use VERBOSE=1 for detailed output and benchmarks."
 endif
 endif
 

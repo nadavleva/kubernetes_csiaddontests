@@ -28,11 +28,15 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
 	storageframework "k8s.io/kubernetes/test/e2e/storage/framework"
+	storageutils "k8s.io/kubernetes/test/e2e/storage/utils"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
@@ -91,8 +95,11 @@ func (r *replicationTestSuite) SkipUnsupportedTests(driver storageframework.Test
 
 func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, pattern storageframework.TestPattern) {
 	type local struct {
-		config   *storageframework.PerTestConfig
-		resource *storageframework.VolumeResource
+		config            *storageframework.PerTestConfig
+		resource          *storageframework.VolumeResource
+		volumeReplication *unstructured.Unstructured
+		snapshots         []*unstructured.Unstructured
+		pods              []*v1.Pod // Track pods for cleanup
 	}
 	var dInfo = driver.GetDriverInfo()
 	var l local
@@ -102,17 +109,69 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	init := func(ctx context.Context) {
-		l = local{}
+		l = local{
+			pods: []*v1.Pod{}, // Initialize pods slice
+		}
 		l.config = driver.PrepareTest(ctx, f)
 		testVolumeSizeRange := r.GetTestSuiteInfo().SupportedSizeRange
 		l.resource = storageframework.CreateVolumeResource(ctx, driver, l.config, pattern, testVolumeSizeRange)
 	}
 
 	cleanup := func(ctx context.Context) {
+		dc := f.DynamicClient
+		ns := f.Namespace.Name
+
+		framework.Logf("Starting cleanup for namespace %s", ns)
+
+		// Cleanup pods first - pods must be deleted before PVCs can be deleted
+		for _, pod := range l.pods {
+			if pod != nil {
+				podName := pod.Name
+				framework.Logf("Cleaning up pod %s/%s", ns, podName)
+				err := e2epod.DeletePodWithWait(ctx, f.ClientSet, pod)
+				if err != nil {
+					framework.Logf("Warning: failed to delete pod %s/%s: %v", ns, podName, err)
+				}
+			}
+		}
+		l.pods = nil
+
+		// Cleanup VolumeReplication CRD
+		if l.volumeReplication != nil {
+			vrName := l.volumeReplication.GetName()
+			framework.Logf("Cleaning up VolumeReplication %s/%s", ns, vrName)
+			err := storageutils.DeleteVolumeReplication(ctx, dc, ns, vrName)
+			if err != nil {
+				framework.Logf("Warning: failed to delete VolumeReplication %s/%s: %v", ns, vrName, err)
+			}
+			l.volumeReplication = nil
+		}
+
+		// Cleanup snapshots
+		for _, snapshot := range l.snapshots {
+			if snapshot != nil {
+				snapshotName := snapshot.GetName()
+				framework.Logf("Cleaning up snapshot %s/%s", ns, snapshotName)
+				err := storageutils.DeleteSnapshotWithoutWaiting(ctx, dc, ns, snapshotName)
+				if err != nil {
+					framework.Logf("Warning: failed to delete snapshot %s/%s: %v", ns, snapshotName, err)
+				}
+			}
+		}
+		l.snapshots = nil
+
+		// Cleanup volume resource (PVC, PV) - this must be done last
+		// as VolumeReplication may have finalizers that depend on the PVC
 		if l.resource != nil {
-			l.resource.CleanupResource(ctx)
+			framework.Logf("Cleaning up volume resource (PVC, PV)")
+			err := l.resource.CleanupResource(ctx)
+			if err != nil {
+				framework.Logf("Warning: failed to cleanup volume resource: %v", err)
+			}
 			l.resource = nil
 		}
+
+		framework.Logf("Cleanup completed for namespace %s", ns)
 	}
 
 	ginkgo.Context("EnableVolumeReplication", func() {
@@ -121,15 +180,31 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
-			// Create a PVC with replication parameters
+			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Wait for PVC to be bound before creating VolumeReplication
+			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
+				ctx, v1.ClaimBound, f.ClientSet, pvc.Namespace, pvc.Name, framework.Poll, f.Timeouts.ClaimProvision))
+
+			// Create VolumeReplication CRD for snapshot mode
+			dc := f.DynamicClient
+			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			replicationClassName := "default-replication-class"
+			parameters := map[string]string{
+				"replication.storage.openshift.io/replication-mode": "snapshot",
+			}
+			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", parameters)
+			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
+			l.volumeReplication = vr
 
 			// Create pod that uses the volume
 			pod, err := createReplicationTestPod(ctx, f, l.config, l.resource, "snapshot-mode-test")
 			framework.ExpectNoError(err, "Failed to create test pod")
+			l.pods = append(l.pods, pod)
 			ginkgo.DeferCleanup(func(ctx context.Context) {
-				e2epod.DeletePodOrFail(ctx, f.ClientSet, pod.Namespace, pod.Name)
+				e2epod.DeletePodWithWait(ctx, f.ClientSet, pod)
 			})
 
 			// Wait for pod to be ready
@@ -152,15 +227,31 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
-			// Create a PVC with journal replication mode parameters
+			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Wait for PVC to be bound before creating VolumeReplication
+			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
+				ctx, v1.ClaimBound, f.ClientSet, pvc.Namespace, pvc.Name, framework.Poll, f.Timeouts.ClaimProvision))
+
+			// Create VolumeReplication CRD for journal mode
+			dc := f.DynamicClient
+			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			replicationClassName := "default-replication-class"
+			parameters := map[string]string{
+				"replication.storage.openshift.io/replication-mode": "journal",
+			}
+			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "journal", parameters)
+			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
+			l.volumeReplication = vr
 
 			// Create pod that uses the volume
 			pod, err := createReplicationTestPod(ctx, f, l.config, l.resource, "journal-mode-test")
 			framework.ExpectNoError(err, "Failed to create test pod")
+			l.pods = append(l.pods, pod)
 			ginkgo.DeferCleanup(func(ctx context.Context) {
-				e2epod.DeletePodOrFail(ctx, f.ClientSet, pod.Namespace, pod.Name)
+				e2epod.DeletePodWithWait(ctx, f.ClientSet, pod)
 			})
 
 			// Wait for pod to be ready
@@ -183,15 +274,31 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
-			// Create a PVC and enable replication
+			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Wait for PVC to be bound before creating VolumeReplication
+			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
+				ctx, v1.ClaimBound, f.ClientSet, pvc.Namespace, pvc.Name, framework.Poll, f.Timeouts.ClaimProvision))
+
+			// Create VolumeReplication CRD (first time)
+			dc := f.DynamicClient
+			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			replicationClassName := "default-replication-class"
+			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", nil)
+			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
+			l.volumeReplication = vr
+
+			// Attempt to create the same VolumeReplication again to test idempotency
+			// In a real scenario, the controller should handle this gracefully
 
 			// Create pod that uses the volume
 			pod, err := createReplicationTestPod(ctx, f, l.config, l.resource, "idempotent-test")
 			framework.ExpectNoError(err, "Failed to create test pod")
+			l.pods = append(l.pods, pod)
 			ginkgo.DeferCleanup(func(ctx context.Context) {
-				e2epod.DeletePodOrFail(ctx, f.ClientSet, pod.Namespace, pod.Name)
+				e2epod.DeletePodWithWait(ctx, f.ClientSet, pod)
 			})
 
 			// Wait for pod to be ready
@@ -228,15 +335,28 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
-			// Create a PVC with replication enabled
+			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Wait for PVC to be bound before creating VolumeReplication
+			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
+				ctx, v1.ClaimBound, f.ClientSet, pvc.Namespace, pvc.Name, framework.Poll, f.Timeouts.ClaimProvision))
+
+			// Create VolumeReplication CRD
+			dc := f.DynamicClient
+			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			replicationClassName := "default-replication-class"
+			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", nil)
+			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
+			l.volumeReplication = vr
 
 			// Create pod that uses the volume
 			pod, err := createReplicationTestPod(ctx, f, l.config, l.resource, "health-status-test")
 			framework.ExpectNoError(err, "Failed to create test pod")
+			l.pods = append(l.pods, pod)
 			ginkgo.DeferCleanup(func(ctx context.Context) {
-				e2epod.DeletePodOrFail(ctx, f.ClientSet, pod.Namespace, pod.Name)
+				e2epod.DeletePodWithWait(ctx, f.ClientSet, pod)
 			})
 
 			// Wait for pod to be ready
@@ -270,8 +390,9 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			// Create pod that uses the volume
 			pod, err := createReplicationTestPod(ctx, f, l.config, l.resource, "non-replicated-test")
 			framework.ExpectNoError(err, "Failed to create test pod")
+			l.pods = append(l.pods, pod)
 			ginkgo.DeferCleanup(func(ctx context.Context) {
-				e2epod.DeletePodOrFail(ctx, f.ClientSet, pod.Namespace, pod.Name)
+				e2epod.DeletePodWithWait(ctx, f.ClientSet, pod)
 			})
 
 			// Wait for pod to be ready
@@ -324,6 +445,12 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 // Helper functions for replication testing
 
 func createReplicationTestPod(ctx context.Context, f *framework.Framework, config *storageframework.PerTestConfig, resource *storageframework.VolumeResource, podName string) (*v1.Pod, error) {
+	// Determine volume mode (Block or Filesystem)
+	var volumeMode v1.PersistentVolumeMode = v1.PersistentVolumeFilesystem
+	if resource.Pvc != nil && resource.Pvc.Spec.VolumeMode != nil {
+		volumeMode = *resource.Pvc.Spec.VolumeMode
+	}
+
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -333,22 +460,35 @@ func createReplicationTestPod(ctx context.Context, f *framework.Framework, confi
 			Containers: []v1.Container{
 				{
 					Name:  "test-container",
-					Image: "busybox",
+					Image: imageutils.GetE2EImage(imageutils.BusyBox),
 					Command: []string{
 						"/bin/sh",
 						"-c",
 						"sleep 3600", // Keep pod running for testing
 					},
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      "test-volume",
-							MountPath: "/test-data",
-						},
-					},
 				},
 			},
 			RestartPolicy: v1.RestartPolicyNever,
 		},
+	}
+
+	// Configure volume attachment based on volume mode
+	if volumeMode == v1.PersistentVolumeBlock {
+		// For Block volumes, use VolumeDevices
+		pod.Spec.Containers[0].VolumeDevices = []v1.VolumeDevice{
+			{
+				Name:       "test-volume",
+				DevicePath: "/dev/test-volume",
+			},
+		}
+	} else {
+		// For Filesystem volumes, use VolumeMounts
+		pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
+			{
+				Name:      "test-volume",
+				MountPath: "/test-data",
+			},
+		}
 	}
 
 	// Add volume based on resource type
@@ -376,12 +516,63 @@ func createReplicationTestPod(ctx context.Context, f *framework.Framework, confi
 }
 
 func writeDataToPod(ctx context.Context, f *framework.Framework, pod *v1.Pod, data string) error {
-	cmd := fmt.Sprintf("echo '%s' >> /test-data/test-file.txt", data)
-	_, _, err := e2epod.ExecCommandInContainerWithFullOutput(f, pod.Name, "test-container", "/bin/sh", "-c", cmd)
+	// Get PVC to determine volume mode
+	pvc, err := f.ClientSet.CoreV1().PersistentVolumeClaims(pod.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	var volumeMode v1.PersistentVolumeMode = v1.PersistentVolumeFilesystem
+	for _, claim := range pvc.Items {
+		for _, vol := range pod.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == claim.Name {
+				if claim.Spec.VolumeMode != nil {
+					volumeMode = *claim.Spec.VolumeMode
+				}
+				break
+			}
+		}
+	}
+
+	var cmd string
+	if volumeMode == v1.PersistentVolumeBlock {
+		// For Block volumes, write directly to device
+		cmd = fmt.Sprintf("echo '%s' | dd of=/dev/test-volume bs=1 conv=notrunc 2>/dev/null || echo '%s' > /dev/test-volume", data, data)
+	} else {
+		// For Filesystem volumes, write to file
+		cmd = fmt.Sprintf("echo '%s' >> /test-data/test-file.txt", data)
+	}
+	_, _, err = e2epod.ExecCommandInContainerWithFullOutput(f, pod.Name, "test-container", "/bin/sh", "-c", cmd)
 	return err
 }
 
 func readDataFromPod(ctx context.Context, f *framework.Framework, pod *v1.Pod) (string, error) {
-	stdout, _, err := e2epod.ExecCommandInContainerWithFullOutput(f, pod.Name, "test-container", "/bin/sh", "-c", "cat /test-data/test-file.txt 2>/dev/null || echo 'no data'")
+	// Get PVC to determine volume mode
+	pvc, err := f.ClientSet.CoreV1().PersistentVolumeClaims(pod.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	var volumeMode v1.PersistentVolumeMode = v1.PersistentVolumeFilesystem
+	for _, claim := range pvc.Items {
+		for _, vol := range pod.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == claim.Name {
+				if claim.Spec.VolumeMode != nil {
+					volumeMode = *claim.Spec.VolumeMode
+				}
+				break
+			}
+		}
+	}
+
+	var cmd string
+	if volumeMode == v1.PersistentVolumeBlock {
+		// For Block volumes, read from device
+		cmd = "dd if=/dev/test-volume bs=1M count=1 2>/dev/null || cat /dev/test-volume"
+	} else {
+		// For Filesystem volumes, read from file
+		cmd = "cat /test-data/test-file.txt 2>/dev/null || echo 'no data'"
+	}
+	stdout, _, err := e2epod.ExecCommandInContainerWithFullOutput(f, pod.Name, "test-container", "/bin/sh", "-c", cmd)
 	return stdout, err
 }

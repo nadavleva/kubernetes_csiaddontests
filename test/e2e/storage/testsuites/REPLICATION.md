@@ -338,13 +338,13 @@ ginkgo -focus='External.Storage.*driver-name' \
 ### Compliance Requirements
 
 For CSI replication certification, drivers must:
-- ✅ Support `EnableVolumeReplication` gRPC method
-- ✅ Support `GetVolumeReplicationInfo` gRPC method  
-- ✅ Handle snapshot mode replication parameters
-- ✅ Handle journal mode replication parameters
-- ✅ Provide idempotent operation behavior
-- ✅ Return appropriate error codes for invalid parameters
-- ✅ Support standard Kubernetes volume lifecycle with replication
+- Support `EnableVolumeReplication` gRPC method
+- Support `GetVolumeReplicationInfo` gRPC method  
+- Handle snapshot mode replication parameters
+- Handle journal mode replication parameters
+- Provide idempotent operation behavior
+- Return appropriate error codes for invalid parameters
+- Support standard Kubernetes volume lifecycle with replication
 
 ---
 

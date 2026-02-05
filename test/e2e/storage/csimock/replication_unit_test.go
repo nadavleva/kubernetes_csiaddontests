@@ -47,7 +47,7 @@ type MockGetVolumeReplicationInfoResponse struct {
 // TestCSIReplicationProtocol tests CSI replication protocol validation without requiring a cluster
 func TestCSIReplicationProtocol(t *testing.T) {
 	t.Run("EnableVolumeReplication snapshot mode parameters", func(t *testing.T) {
-		t.Logf("🚀 [TEST] Testing EnableVolumeReplication with snapshot mode parameters")
+		t.Logf("[TEST] Testing EnableVolumeReplication with snapshot mode parameters")
 
 		// Test valid snapshot mode parameters
 		req := &MockEnableVolumeReplicationRequest{
@@ -59,7 +59,7 @@ func TestCSIReplicationProtocol(t *testing.T) {
 			},
 		}
 
-		t.Logf("📝 [VALIDATE] Parameters: %+v", req.Parameters)
+		t.Logf("[VALIDATE] Parameters: %+v", req.Parameters)
 
 		// Validate required parameters are present
 		if mode, ok := req.Parameters["replication.storage.openshift.io/replication-mode"]; !ok || mode != "snapshot" {
@@ -70,11 +70,11 @@ func TestCSIReplicationProtocol(t *testing.T) {
 			t.Errorf("Expected remote-cluster to be set, got %q", cluster)
 		}
 
-		t.Logf("✅ [SUCCESS] Snapshot mode parameter validation passed")
+		t.Logf("[SUCCESS] Snapshot mode parameter validation passed")
 	})
 
 	t.Run("EnableVolumeReplication journal mode parameters", func(t *testing.T) {
-		t.Logf("🚀 [TEST] Testing EnableVolumeReplication with journal mode parameters")
+		t.Logf("[TEST] Testing EnableVolumeReplication with journal mode parameters")
 
 		// Test valid journal mode parameters
 		req := &MockEnableVolumeReplicationRequest{
@@ -87,7 +87,7 @@ func TestCSIReplicationProtocol(t *testing.T) {
 			},
 		}
 
-		t.Logf("📝 [VALIDATE] Parameters: %+v", req.Parameters)
+		t.Logf("[VALIDATE] Parameters: %+v", req.Parameters)
 
 		// Validate journal-specific parameters
 		if mode, ok := req.Parameters["replication.storage.openshift.io/replication-mode"]; !ok || mode != "journal" {
@@ -98,17 +98,17 @@ func TestCSIReplicationProtocol(t *testing.T) {
 			t.Errorf("Expected journal-pool to be set for journal mode, got %q", pool)
 		}
 
-		t.Logf("✅ [SUCCESS] Journal mode parameter validation passed")
+		t.Logf("[SUCCESS] Journal mode parameter validation passed")
 	})
 
 	t.Run("GetVolumeReplicationInfo validation", func(t *testing.T) {
-		t.Logf("🚀 [TEST] Testing GetVolumeReplicationInfo validation")
+		t.Logf("[TEST] Testing GetVolumeReplicationInfo validation")
 
 		req := &MockGetVolumeReplicationInfoRequest{
 			VolumeId: "test-volume-004",
 		}
 
-		t.Logf("📝 [VALIDATE] Volume ID: %s", req.VolumeId)
+		t.Logf("[VALIDATE] Volume ID: %s", req.VolumeId)
 
 		// Simulate successful response validation
 		mockResponse := &MockGetVolumeReplicationInfoResponse{
@@ -121,9 +121,9 @@ func TestCSIReplicationProtocol(t *testing.T) {
 			},
 		}
 
-		t.Logf("📊 [RESPONSE] Mirror Status: %s", mockResponse.VolumeMirrorStatus.State)
-		t.Logf("📊 [RESPONSE] Description: %s", mockResponse.VolumeMirrorStatus.Description)
-		t.Logf("📊 [RESPONSE] Last Sync: %d bytes in %d seconds",
+		t.Logf("[RESPONSE] Mirror Status: %s", mockResponse.VolumeMirrorStatus.State)
+		t.Logf("[RESPONSE] Description: %s", mockResponse.VolumeMirrorStatus.Description)
+		t.Logf("[RESPONSE] Last Sync: %d bytes in %d seconds",
 			mockResponse.VolumeMirrorStatus.LastSyncBytes,
 			mockResponse.VolumeMirrorStatus.LastSyncDuration)
 
@@ -136,7 +136,7 @@ func TestCSIReplicationProtocol(t *testing.T) {
 			t.Errorf("Expected LastSyncBytes > 0, got %d", mockResponse.VolumeMirrorStatus.LastSyncBytes)
 		}
 
-		t.Logf("✅ [SUCCESS] GetVolumeReplicationInfo validation passed")
+		t.Logf("[SUCCESS] GetVolumeReplicationInfo validation passed")
 	})
 }
 
@@ -156,7 +156,7 @@ func TestReplicationParameterValidation(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				t.Logf("🧪 [VALIDATION] Testing mode: %q", tc.mode)
+				t.Logf("[VALIDATION] Testing mode: %q", tc.mode)
 
 				validModes := []string{"snapshot", "journal"}
 				isValid := false
@@ -172,7 +172,7 @@ func TestReplicationParameterValidation(t *testing.T) {
 				} else if !tc.expectError && !isValid {
 					t.Errorf("Expected mode %q to be valid, but validation failed", tc.mode)
 				} else {
-					t.Logf("✅ [SUCCESS] Mode validation for %q worked as expected", tc.mode)
+					t.Logf("[SUCCESS] Mode validation for %q worked as expected", tc.mode)
 				}
 			})
 		}
