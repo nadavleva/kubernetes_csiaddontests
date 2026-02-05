@@ -22,6 +22,7 @@ package testsuites
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -29,6 +30,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
@@ -42,6 +44,68 @@ import (
 
 type replicationTestSuite struct {
 	tsInfo storageframework.TestSuiteInfo
+}
+
+// getTestName returns the current test name from ginkgo
+func getTestName() string {
+	spec := ginkgo.CurrentSpecReport()
+	testName := strings.Join(spec.ContainerHierarchyTexts, " ")
+	if len(spec.LeafNodeText) > 0 {
+		if testName != "" {
+			testName = testName + " " + spec.LeafNodeText
+		} else {
+			testName = spec.LeafNodeText
+		}
+	}
+	if testName == "" {
+		testName = "unknown-test"
+	}
+	return testName
+}
+
+// sanitizeTestNameForLabel converts a test name to a valid Kubernetes label value
+func sanitizeTestNameForLabel(testName string) string {
+	// Remove special characters and convert to lowercase
+	result := ""
+	for _, r := range testName {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			result += string(r)
+		} else if r >= 'A' && r <= 'Z' {
+			result += string(r + 32) // Convert to lowercase
+		} else if r == ' ' || r == '[' || r == ']' {
+			result += "-"
+		}
+		// Skip other special characters
+	}
+
+	// Limit length to 63 characters (Kubernetes label value limit)
+	if len(result) > 63 {
+		result = result[:63]
+	}
+
+	// Remove leading/trailing dashes
+	result = strings.Trim(result, "-")
+
+	if result == "" {
+		result = "unknown-test"
+	}
+
+	return result
+}
+
+// labelPVCWithTestName adds a test-case label to a PVC for easier identification
+func labelPVCWithTestName(ctx context.Context, f *framework.Framework, pvc *v1.PersistentVolumeClaim, testName string) {
+	if pvc == nil {
+		return
+	}
+	if pvc.Labels == nil {
+		pvc.Labels = make(map[string]string)
+	}
+	pvc.Labels["test-case"] = sanitizeTestNameForLabel(testName)
+	_, err := f.ClientSet.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc, metav1.UpdateOptions{})
+	if err != nil {
+		framework.Logf("Warning: failed to add test-case label to PVC %s/%s: %v", pvc.Namespace, pvc.Name, err)
+	}
 }
 
 var _ storageframework.TestSuite = &replicationTestSuite{}
@@ -123,6 +187,8 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 
 		framework.Logf("Starting cleanup for namespace %s", ns)
 
+		var cleanupErrs []error
+
 		// Cleanup pods first - pods must be deleted before PVCs can be deleted
 		for _, pod := range l.pods {
 			if pod != nil {
@@ -130,19 +196,21 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 				framework.Logf("Cleaning up pod %s/%s", ns, podName)
 				err := e2epod.DeletePodWithWait(ctx, f.ClientSet, pod)
 				if err != nil {
-					framework.Logf("Warning: failed to delete pod %s/%s: %v", ns, podName, err)
+					cleanupErrs = append(cleanupErrs, fmt.Errorf("failed to delete pod %s/%s: %w", ns, podName, err))
 				}
 			}
 		}
 		l.pods = nil
 
 		// Cleanup VolumeReplication CRD
+		// This must be done before PVC cleanup as VolumeReplication may reference the PVC
+		// DeleteVolumeReplication will check for and remove finalizers proactively
 		if l.volumeReplication != nil {
 			vrName := l.volumeReplication.GetName()
 			framework.Logf("Cleaning up VolumeReplication %s/%s", ns, vrName)
 			err := storageutils.DeleteVolumeReplication(ctx, dc, ns, vrName)
 			if err != nil {
-				framework.Logf("Warning: failed to delete VolumeReplication %s/%s: %v", ns, vrName, err)
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("failed to cleanup VolumeReplication %s/%s: %w", ns, vrName, err))
 			}
 			l.volumeReplication = nil
 		}
@@ -154,7 +222,7 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 				framework.Logf("Cleaning up snapshot %s/%s", ns, snapshotName)
 				err := storageutils.DeleteSnapshotWithoutWaiting(ctx, dc, ns, snapshotName)
 				if err != nil {
-					framework.Logf("Warning: failed to delete snapshot %s/%s: %v", ns, snapshotName, err)
+					cleanupErrs = append(cleanupErrs, fmt.Errorf("failed to delete snapshot %s/%s: %w", ns, snapshotName, err))
 				}
 			}
 		}
@@ -163,15 +231,31 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 		// Cleanup volume resource (PVC, PV) - this must be done last
 		// as VolumeReplication may have finalizers that depend on the PVC
 		if l.resource != nil {
+			// Check for and remove finalizers on PVC before deletion
+			if l.resource.Pvc != nil {
+				pvcName := l.resource.Pvc.Name
+				framework.Logf("Checking for finalizers on PVC %s/%s before cleanup", ns, pvcName)
+				err := storageutils.RemovePVCFinalizers(ctx, f.ClientSet, ns, pvcName)
+				if err != nil {
+					framework.Logf("Warning: failed to remove finalizers from PVC %s/%s: %v (will attempt cleanup anyway)", ns, pvcName, err)
+				}
+			}
+
 			framework.Logf("Cleaning up volume resource (PVC, PV)")
 			err := l.resource.CleanupResource(ctx)
 			if err != nil {
-				framework.Logf("Warning: failed to cleanup volume resource: %v", err)
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("failed to cleanup volume resource: %w", err))
 			}
 			l.resource = nil
 		}
 
-		framework.Logf("Cleanup completed for namespace %s", ns)
+		// Fail the test if cleanup didn't complete successfully
+		// This ensures we don't leave orphaned resources
+		if len(cleanupErrs) > 0 {
+			framework.Failf("Cleanup failed for namespace %s: %v", ns, errors.NewAggregate(cleanupErrs))
+		}
+
+		framework.Logf("Cleanup completed successfully for namespace %s", ns)
 	}
 
 	ginkgo.Context("EnableVolumeReplication", func() {
@@ -180,9 +264,15 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
+			// Get test name for labeling resources
+			testName := getTestName()
+
 			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Add test name label to PVC for easier identification
+			labelPVCWithTestName(ctx, f, pvc, testName)
 
 			// Wait for PVC to be bound before creating VolumeReplication
 			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
@@ -190,12 +280,16 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 
 			// Create VolumeReplication CRD for snapshot mode
 			dc := f.DynamicClient
-			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			vrName := fmt.Sprintf("vr-%s-%s", sanitizeTestNameForLabel(testName), pvc.Name)
+			// Limit VR name length to 63 characters (Kubernetes name limit)
+			if len(vrName) > 63 {
+				vrName = vrName[:63]
+			}
 			replicationClassName := "default-replication-class"
 			parameters := map[string]string{
 				"replication.storage.openshift.io/replication-mode": "snapshot",
 			}
-			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", parameters)
+			vr, err := storageutils.CreateVolumeReplicationWithTestName(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", parameters, testName)
 			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
 			l.volumeReplication = vr
 
@@ -227,9 +321,15 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
+			// Get test name for labeling resources
+			testName := getTestName()
+
 			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Add test name label to PVC for easier identification
+			labelPVCWithTestName(ctx, f, pvc, testName)
 
 			// Wait for PVC to be bound before creating VolumeReplication
 			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
@@ -237,12 +337,16 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 
 			// Create VolumeReplication CRD for journal mode
 			dc := f.DynamicClient
-			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			vrName := fmt.Sprintf("vr-%s-%s", sanitizeTestNameForLabel(testName), pvc.Name)
+			// Limit VR name length to 63 characters (Kubernetes name limit)
+			if len(vrName) > 63 {
+				vrName = vrName[:63]
+			}
 			replicationClassName := "default-replication-class"
 			parameters := map[string]string{
 				"replication.storage.openshift.io/replication-mode": "journal",
 			}
-			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "journal", parameters)
+			vr, err := storageutils.CreateVolumeReplicationWithTestName(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "journal", parameters, testName)
 			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
 			l.volumeReplication = vr
 
@@ -274,9 +378,15 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
+			// Get test name for labeling resources
+			testName := getTestName()
+
 			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Add test name label to PVC for easier identification
+			labelPVCWithTestName(ctx, f, pvc, testName)
 
 			// Wait for PVC to be bound before creating VolumeReplication
 			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
@@ -284,9 +394,13 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 
 			// Create VolumeReplication CRD (first time)
 			dc := f.DynamicClient
-			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			vrName := fmt.Sprintf("vr-%s-%s", sanitizeTestNameForLabel(testName), pvc.Name)
+			// Limit VR name length to 63 characters (Kubernetes name limit)
+			if len(vrName) > 63 {
+				vrName = vrName[:63]
+			}
 			replicationClassName := "default-replication-class"
-			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", nil)
+			vr, err := storageutils.CreateVolumeReplicationWithTestName(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", nil, testName)
 			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
 			l.volumeReplication = vr
 
@@ -335,9 +449,15 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
+			// Get test name for labeling resources
+			testName := getTestName()
+
 			// Create a PVC
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Add test name label to PVC for easier identification
+			labelPVCWithTestName(ctx, f, pvc, testName)
 
 			// Wait for PVC to be bound before creating VolumeReplication
 			framework.ExpectNoError(e2epv.WaitForPersistentVolumeClaimPhase(
@@ -345,9 +465,13 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 
 			// Create VolumeReplication CRD
 			dc := f.DynamicClient
-			vrName := fmt.Sprintf("vr-%s", pvc.Name)
+			vrName := fmt.Sprintf("vr-%s-%s", sanitizeTestNameForLabel(testName), pvc.Name)
+			// Limit VR name length to 63 characters (Kubernetes name limit)
+			if len(vrName) > 63 {
+				vrName = vrName[:63]
+			}
 			replicationClassName := "default-replication-class"
-			vr, err := storageutils.CreateVolumeReplication(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", nil)
+			vr, err := storageutils.CreateVolumeReplicationWithTestName(ctx, dc, f.Namespace.Name, vrName, pvc.Name, replicationClassName, "snapshot", nil, testName)
 			framework.ExpectNoError(err, "Failed to create VolumeReplication CRD")
 			l.volumeReplication = vr
 
@@ -383,9 +507,15 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
+			// Get test name for labeling resources
+			testName := getTestName()
+
 			// Create a regular PVC without replication
 			pvc := l.resource.Pvc
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created")
+
+			// Add test name label to PVC for easier identification
+			labelPVCWithTestName(ctx, f, pvc, testName)
 
 			// Create pod that uses the volume
 			pod, err := createReplicationTestPod(ctx, f, l.config, l.resource, "non-replicated-test")
@@ -418,11 +548,13 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 			init(ctx)
 			ginkgo.DeferCleanup(cleanup)
 
-			// Get the StorageClass used by this test
-			dDriver, ok := driver.(storageframework.DynamicPVTestDriver)
-			gomega.Expect(ok).To(gomega.BeTrue(), "Driver should support dynamic provisioning")
-			sc := dDriver.GetDynamicProvisionStorageClass(ctx, l.config, "")
-			gomega.Expect(sc).NotTo(gomega.BeNil(), "StorageClass should be available")
+			// Get test name for labeling resources
+			testName := getTestName()
+
+			// Get the StorageClass that was used to create the PVC
+			// Use the StorageClass from the resource instead of creating a new one
+			sc := l.resource.Sc
+			gomega.Expect(sc).NotTo(gomega.BeNil(), "StorageClass should be available from resource")
 
 			// Validate that the provisioner supports replication
 			// In a real implementation, this would check for replication-specific parameters
@@ -432,6 +564,9 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 
 			// Verify the StorageClass can be used to create volumes
 			pvc := l.resource.Pvc
+
+			// Add test name label to PVC for easier identification
+			labelPVCWithTestName(ctx, f, pvc, testName)
 			gomega.Expect(pvc).NotTo(gomega.BeNil(), "PVC should be created successfully with replication StorageClass")
 			gomega.Expect(pvc.Spec.StorageClassName).NotTo(gomega.BeNil(), "PVC should reference a StorageClass")
 			gomega.Expect(*pvc.Spec.StorageClassName).To(gomega.Equal(sc.Name), "PVC should use the correct StorageClass")
@@ -445,6 +580,11 @@ func (r *replicationTestSuite) DefineTests(driver storageframework.TestDriver, p
 // Helper functions for replication testing
 
 func createReplicationTestPod(ctx context.Context, f *framework.Framework, config *storageframework.PerTestConfig, resource *storageframework.VolumeResource, podName string) (*v1.Pod, error) {
+	// Validate that we have a volume source
+	if resource.Pvc == nil && resource.VolSource == nil {
+		return nil, fmt.Errorf("invalid VolumeResource: both Pvc and VolSource are nil, cannot create pod without volume")
+	}
+
 	// Determine volume mode (Block or Filesystem)
 	var volumeMode v1.PersistentVolumeMode = v1.PersistentVolumeFilesystem
 	if resource.Pvc != nil && resource.Pvc.Spec.VolumeMode != nil {
@@ -472,26 +612,7 @@ func createReplicationTestPod(ctx context.Context, f *framework.Framework, confi
 		},
 	}
 
-	// Configure volume attachment based on volume mode
-	if volumeMode == v1.PersistentVolumeBlock {
-		// For Block volumes, use VolumeDevices
-		pod.Spec.Containers[0].VolumeDevices = []v1.VolumeDevice{
-			{
-				Name:       "test-volume",
-				DevicePath: "/dev/test-volume",
-			},
-		}
-	} else {
-		// For Filesystem volumes, use VolumeMounts
-		pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
-			{
-				Name:      "test-volume",
-				MountPath: "/test-data",
-			},
-		}
-	}
-
-	// Add volume based on resource type
+	// Add volume based on resource type first
 	if resource.Pvc != nil {
 		pod.Spec.Volumes = []v1.Volume{
 			{
@@ -509,6 +630,28 @@ func createReplicationTestPod(ctx context.Context, f *framework.Framework, confi
 				Name:         "test-volume",
 				VolumeSource: *resource.VolSource,
 			},
+		}
+	}
+
+	// Configure volume attachment based on volume mode
+	// Only add mounts/devices if we have a volume defined
+	if len(pod.Spec.Volumes) > 0 {
+		if volumeMode == v1.PersistentVolumeBlock {
+			// For Block volumes, use VolumeDevices
+			pod.Spec.Containers[0].VolumeDevices = []v1.VolumeDevice{
+				{
+					Name:       "test-volume",
+					DevicePath: "/dev/test-volume",
+				},
+			}
+		} else {
+			// For Filesystem volumes, use VolumeMounts
+			pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
+				{
+					Name:      "test-volume",
+					MountPath: "/test-data",
+				},
+			}
 		}
 	}
 
