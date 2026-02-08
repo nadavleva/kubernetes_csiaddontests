@@ -1,0 +1,13 @@
+DriverInfo:
+  Name: rook-ceph.rbd.csi.ceph.com
+  SupportedSizeRange:
+    Min: 1Gi
+    Max: 10Ti
+  Capabilities:
+    persistence: true
+    replication: true
+    block: true
+    controllerExpansion: true
+    topology: true
+StorageClass:
+  FromExistingClassName: rook-ceph-block

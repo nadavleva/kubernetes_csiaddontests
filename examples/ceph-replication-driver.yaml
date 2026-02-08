@@ -1,0 +1,56 @@
+# CSI Replication Test Driver Configuration for Ceph
+# 
+# This file configures the storage e2e test framework to run replication tests
+# against a Ceph CSI driver. Modify this file to match your Ceph CSI driver deployment.
+#
+# For detailed documentation, see:
+# - test/e2e/storage/docs/ceph-replication-testing.md
+# - test/e2e/storage/docs/ceph-replication-quickstart.md
+#
+# Typical Ceph CSI driver names:
+# - rbd.csi.ceph.com (for RBD volumes)
+# - cephfs.csi.ceph.com (for CephFS volumes)
+
+DriverInfo:
+  # Replace with your actual Ceph CSI driver name
+  # Common values: rbd.csi.ceph.com or cephfs.csi.ceph.com
+  Name: rbd.csi.ceph.com
+  
+  # Supported volume size range (adjust based on your Ceph cluster)
+  SupportedSizeRange:
+    Min: 1Gi
+    Max: 10Ti
+  
+  # Required capabilities for replication testing
+  Capabilities:
+    persistence: true      # Required: Data persistence across pod restarts
+    replication: true      # Required: CSI replication support
+    
+    # Optional capabilities (enable if your Ceph driver supports them)
+    block: true           # Raw block volume support
+    controllerExpansion: true  # Volume expansion support
+    nodeExpansion: true   # Node-level volume expansion
+    snapshotDataSource: true  # Snapshot data source support
+    topology: true        # Multi-zone replication support (useful for 3-node cluster)
+    multipods: false      # Set to true if driver supports ReadWriteMany
+
+# StorageClass configuration
+# Option 1: Use an existing StorageClass (recommended if you already have one configured)
+StorageClass:
+  FromExistingClassName: csi-rbd-sc  # Replace with your actual StorageClass name
+
+# Option 2: Use a StorageClass from a file (uncomment and use if preferred)
+# StorageClass:
+#   FromFile: "configs/ceph-replication-sc.yaml"
+#
+# For more information on testing Ceph replication, see:
+# test/e2e/storage/docs/ceph-replication-testing.md
+
+# Optional: SnapshotClass configuration (if you want to test snapshots)
+# SnapshotClass:
+#   FromExistingClassName: csi-rbd-snapclass  # Replace with your actual SnapshotClass name
+
+# Optional: Custom timeouts (adjust if your cluster is slower)
+# Timeouts:
+#   PodStart: "10m"
+#   PVBound: "5m"

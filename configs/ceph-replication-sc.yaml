@@ -1,0 +1,31 @@
+# Example StorageClass for Ceph RBD with replication support
+# This is an example - adjust parameters based on your Ceph cluster configuration
+#
+# To use this file, update the driver config to use:
+# StorageClass:
+#   FromFile: "configs/ceph-replication-sc.yaml"
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-rbd-replication-sc
+  annotations:
+    # Enable replication for this storage class
+    replication.storage.openshift.io/replication-enabled: "true"
+provisioner: rbd.csi.ceph.com
+parameters:
+  # Ceph-specific parameters (adjust based on your cluster)
+  clusterID: "your-cluster-id"  # Replace with your Ceph cluster ID
+  pool: "replicapool"          # Replace with your RBD pool name
+  imageFormat: "2"
+  imageFeatures: "layering"
+  
+  # Replication-specific parameters
+  # These parameters are passed to the CSI driver's EnableVolumeReplication call
+  replication.storage.openshift.io/replication-mode: "snapshot"  # or "journal"
+  replication.storage.openshift.io/remote-cluster: "remote-cluster-1"
+  replication.storage.openshift.io/schedule: "5m"  # replication frequency (for snapshot mode)
+  
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+reclaimPolicy: Delete
