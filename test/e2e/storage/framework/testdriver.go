@@ -213,6 +213,10 @@ const (
 	// - csi-resizer:v1.3.0+
 	CapReadWriteOncePod Capability = "readWriteOncePod"
 
+	// CSI replication support - driver supports EnableVolumeReplication and GetVolumeReplicationInfo
+	// operations as defined in the CSI Replication specification.
+	CapReplication Capability = "replication"
+
 	// The driver can handle two PersistentVolumes with the same VolumeHandle (= volume_id in CSI spec).
 	// This capability is highly recommended for volumes that support ReadWriteMany access mode,
 	// because creating multiple PVs for the same VolumeHandle is frequently used to share a single
